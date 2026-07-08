@@ -369,6 +369,8 @@
   .transcript-box::-webkit-scrollbar-thumb{background:var(--line);border-radius:3px;}
   .transcript-box .interim{color:var(--faint);font-style:italic;}
   .transcript-box .empty{color:var(--faint);font-size:13px;font-style:italic;}
+  .transcript-box{outline:none;}
+  .transcript-box:empty:before{content:attr(data-placeholder);color:var(--faint);font-size:13px;font-style:italic;}
 
   /* ---------- SCREEN CAPTURES ---------- */
   .capture-section{margin-top:16px;padding-top:16px;border-top:1px solid var(--line);}
@@ -612,7 +614,18 @@
           <button id="srcTab" class="active">Audio d'onglet / réunion</button>
           <button id="srcMic">Microphone</button>
         </div>
-        <p class="hint">« Audio d'onglet » capture le son joué par l'onglet (utile si Zoom/Meet est ouvert dans un onglet du navigateur). « Microphone » enregistre votre voix directement.</p>
+        <p class="hint">« Audio d'onglet » capture le son joué par l'onglet (utile si Zoom/Meet est ouvert dans un onglet du navigateur), mais <strong>la transcription automatique ne fonctionne qu'en mode Microphone</strong> — c'est une limitation des navigateurs. En mode « Audio d'onglet », enregistrez le son normalement, puis tapez ou collez la transcription manuellement dans le champ à droite.</p>
+      </div>
+
+      <div class="capture-section">
+        <div class="capture-row">
+          <span class="lbl">Convertir l'audio enregistré</span>
+          <div style="display:flex;gap:8px;">
+            <button class="btn" id="downloadAudioBtn" disabled style="padding:7px 12px;font-size:11.5px;">⬇️ Télécharger l'audio</button>
+            <button class="btn" id="transcribeAudioBtn" disabled style="padding:7px 12px;font-size:11.5px;">🎧 Convertir en texte</button>
+          </div>
+        </div>
+        <p class="hint" style="text-align:left;margin:0;">Conversion gratuite et open source (modèle Whisper), qui tourne directement dans le navigateur — aucune donnée envoyée à un serveur. Le premier lancement télécharge le modèle IA (~140 Mo, une seule fois, puis mis en cache).</p>
       </div>
 
       <div class="capture-section">
@@ -632,9 +645,7 @@
         <span>Transcription</span>
         <button class="btn" id="clearTranscript" style="padding:4px 10px;font-size:11px;">Effacer</button>
       </p>
-      <div class="transcript-box" id="transcriptBox">
-        <p class="empty">La transcription s'affichera ici pendant l'enregistrement…</p>
-      </div>
+      <div class="transcript-box" id="transcriptBox" contenteditable="true" data-placeholder="La transcription s'affichera ici pendant l'enregistrement (mode Microphone), ou collez/tapez votre texte ici manuellement…"></div>
     </section>
 
     <!-- SUMMARY -->
@@ -695,6 +706,33 @@
     messagingSenderId: "920221735798",
     appId: "1:920221735798:web:40daf019ef8325aaedf857"
   };
+
+  // ⚠️ À CONFIGURER : pour activer le résumé IA et la traduction, créez une clé
+  // GRATUITE (sans carte bancaire) sur https://aistudio.google.com/apikey
+  // puis collez-la ci-dessous.
+  const GEMINI_API_KEY = "AQ.Ab8RN6IacyMzmUf0dX5Djhazvl-1E8hVPfRVU9INXMAUNhJLmg";
+  const GEMINI_MODEL = "gemini-2.5-flash";
+  async function callGemini(prompt){
+    if(!GEMINI_API_KEY || GEMINI_API_KEY.indexOf('REMPLACER')===0){
+      throw new Error("La clé API Gemini n'est pas encore configurée (contactez votre administrateur technique).");
+    }
+    const response = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-goog-api-key': GEMINI_API_KEY },
+        body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] })
+      }
+    );
+    if(!response.ok){
+      const errData = await response.json().catch(()=>null);
+      throw new Error(errData && errData.error && errData.error.message ? errData.error.message : ('Erreur HTTP ' + response.status));
+    }
+    const data = await response.json();
+    const candidate = data.candidates && data.candidates[0];
+    const text = candidate && candidate.content && candidate.content.parts ? candidate.content.parts.map(p=>p.text||'').join('') : '';
+    return text.trim();
+  }
 
   let firebaseReady = false;
   try{
@@ -937,22 +975,132 @@
     r.onend = ()=>{ if(recognizing){ try{ r.start(); }catch(e){} } };
     return r;
   }
+  let userEditingTranscript = false;
   function renderTranscript(interim){
+    if(userEditingTranscript) return; // ne pas écraser une saisie manuelle en cours
     transcriptBox.innerHTML = '';
-    const p1 = document.createElement('p');
-    p1.textContent = finalTranscript || '';
-    transcriptBox.appendChild(p1);
+    if(finalTranscript){
+      const p1 = document.createElement('span');
+      p1.textContent = finalTranscript;
+      transcriptBox.appendChild(p1);
+    }
     if(interim){
       const p2 = document.createElement('span');
       p2.className='interim';
       p2.textContent = interim;
       transcriptBox.appendChild(p2);
     }
-    if(!finalTranscript && !interim){
-      transcriptBox.innerHTML = '<p class="empty">La transcription s\'affichera ici pendant l\'enregistrement…</p>';
-    }
     transcriptBox.scrollTop = transcriptBox.scrollHeight;
   }
+
+  // Permet de taper ou coller la transcription manuellement (utile en mode "Audio d'onglet",
+  // où la reconnaissance vocale du navigateur ne peut pas écouter l'audio capturé).
+  transcriptBox.addEventListener('focus', ()=>{ userEditingTranscript = true; });
+  transcriptBox.addEventListener('blur', ()=>{
+    userEditingTranscript = false;
+    finalTranscript = transcriptBox.innerText.trim();
+    el('saveSession').disabled = !finalTranscript;
+  });
+
+  // ---------- TÉLÉCHARGEMENT DE L'AUDIO BRUT ----------
+  el('downloadAudioBtn').addEventListener('click', ()=>{
+    if(!currentAudioBlob){ return; }
+    const title = el('sessionName').value.trim() || 'enregistrement';
+    const url = URL.createObjectURL(currentAudioBlob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = title.replace(/[^a-z0-9-_]+/gi,'_') + '.webm';
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  });
+
+  // ---------- CONVERSION AUDIO → TEXTE (gratuit, open source, dans le navigateur) ----------
+  // Utilise Whisper (OpenAI) via la bibliothèque Transformers.js de Hugging Face.
+  // Tout tourne en local dans le navigateur : aucune donnée envoyée à un serveur, aucun coût.
+  const ASR_LANG_MAP = { 'fr-FR':'french', 'en-US':'english', 'es-ES':'spanish', 'ar-SA':'arabic', 'pt-PT':'portuguese' };
+  let asrPipelinePromise = null;
+
+  async function getAsrPipeline(onProgress){
+    if(!asrPipelinePromise){
+      asrPipelinePromise = (async ()=>{
+        const { pipeline } = await import('https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.5.1');
+        return await pipeline('automatic-speech-recognition', 'Xenova/whisper-base', {
+          progress_callback: (info)=>{
+            if(info && info.status==='progress' && typeof info.progress==='number'){
+              onProgress(Math.round(info.progress));
+            }
+          }
+        });
+      })();
+    }
+    return asrPipelinePromise;
+  }
+
+  async function decodeAudioTo16kMono(blob){
+    const arrayBuffer = await blob.arrayBuffer();
+    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+    const tempCtx = new AudioCtx();
+    const decoded = await tempCtx.decodeAudioData(arrayBuffer.slice(0));
+    tempCtx.close();
+    if(decoded.sampleRate === 16000 && decoded.numberOfChannels === 1){
+      return decoded.getChannelData(0);
+    }
+    const offline = new OfflineAudioContext(1, Math.ceil(decoded.duration*16000), 16000);
+    const src = offline.createBufferSource();
+    src.buffer = decoded;
+    src.connect(offline.destination);
+    src.start(0);
+    const rendered = await offline.startRendering();
+    return rendered.getChannelData(0);
+  }
+
+  el('transcribeAudioBtn').addEventListener('click', async ()=>{
+    if(!currentAudioBlob){
+      alert("Aucun audio enregistré pour l'instant.");
+      return;
+    }
+    const approxMinutes = currentAudioBlob.size / (16000 * 2 * 60); // estimation grossière
+    if(approxMinutes > 25){
+      const proceed = confirm("Cet enregistrement est assez long (environ " + Math.round(approxMinutes) + " min). La conversion peut échouer ou être très lente selon la mémoire disponible sur cet ordinateur.\n\nConseil : pour de meilleurs résultats, préférez des enregistrements de moins de 20-25 minutes.\n\nContinuer quand même ?");
+      if(!proceed) return;
+    }
+    const btn = el('transcribeAudioBtn');
+    const oldLabel = btn.textContent;
+    btn.disabled = true;
+    try{
+      btn.textContent = '⏳ Préparation du modèle IA…';
+      const transcriber = await getAsrPipeline((pct)=>{ btn.textContent = `⏳ Téléchargement du modèle (${pct}%)…`; });
+
+      btn.textContent = '⏳ Analyse de l\'audio…';
+      const audioData = await decodeAudioTo16kMono(currentAudioBlob);
+
+      btn.textContent = '⏳ Conversion en texte…';
+      const langName = ASR_LANG_MAP[el('recogLang').value] || 'french';
+      const result = await transcriber(audioData, {
+        language: langName,
+        task: 'transcribe',
+        chunk_length_s: 30,
+        stride_length_s: 5
+      });
+      const text = (result && result.text ? result.text : '').trim();
+      if(!text){
+        alert("La conversion n'a produit aucun texte.");
+        return;
+      }
+      finalTranscript = (finalTranscript ? finalTranscript.trim() + '\n' : '') + text;
+      renderTranscript('');
+      el('saveSession').disabled = !finalTranscript;
+    }catch(e){
+      if(e && e.message && e.message.indexOf('decode')!==-1){
+        alert("Impossible d'analyser cet audio : il est probablement trop long ou trop volumineux pour être traité par le navigateur. Essayez avec un enregistrement plus court (moins de 20-25 minutes), ou utilisez le bouton « Télécharger l'audio » et transcrivez-le avec un autre outil.");
+      } else {
+        alert("Erreur lors de la conversion audio → texte : " + e.message);
+      }
+    }finally{
+      btn.disabled = false;
+      btn.textContent = oldLabel;
+    }
+  });
 
   el('clearTranscript').addEventListener('click', ()=>{
     finalTranscript = '';
@@ -993,7 +1141,11 @@
       return;
     }
     mediaRecorder.ondataavailable = e=>{ if(e.data.size>0) audioChunks.push(e.data); };
-    mediaRecorder.onstop = ()=>{ currentAudioBlob = new Blob(audioChunks, {type:'audio/webm'}); };
+    mediaRecorder.onstop = ()=>{
+      currentAudioBlob = new Blob(audioChunks, {type:'audio/webm'});
+      el('transcribeAudioBtn').disabled = false;
+      el('downloadAudioBtn').disabled = false;
+    };
     mediaRecorder.start();
 
     startLevelMeter(mediaStream);
@@ -1093,6 +1245,9 @@
     currentSummary = '';
     currentTranslation = '';
     captures = [];
+    currentAudioBlob = null;
+    el('transcribeAudioBtn').disabled = true;
+    el('downloadAudioBtn').disabled = true;
     el('sessionName').value = '';
     renderTranscript('');
     renderCaptures();
@@ -1124,26 +1279,14 @@
     el('translationBox').style.display='none';
 
     try{
-      const response = await fetch("https://api.anthropic.com/v1/messages", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          model: "claude-sonnet-4-6",
-          max_tokens: 1000,
-          messages: [{
-            role: "user",
-            content: `Voici la transcription d'une réunion ou d'un cours. Détecte automatiquement la langue de cette transcription, puis rédige le résumé dans cette même langue, avec :
+      const prompt = `Voici la transcription d'une réunion ou d'un cours. Détecte automatiquement la langue de cette transcription, puis rédige le résumé dans cette même langue, avec :
 - un court paragraphe de synthèse (2-3 phrases)
 - une liste à puces des points clés
 - une liste des éventuelles actions à faire, si mentionnées
 
 Transcription :
-"""${text}"""`
-          }]
-        })
-      });
-      const data = await response.json();
-      const textOut = (data.content||[]).map(b=>b.text||'').join('\n').trim();
+"""${text}"""`;
+      const textOut = await callGemini(prompt);
       currentSummary = textOut || "Le résumé n'a pas pu être généré.";
       summaryOutput.textContent = currentSummary;
       el('exportPdf').disabled = false;
@@ -1168,22 +1311,10 @@ Transcription :
     const oldLabel = btn.textContent;
     btn.textContent = '⏳ Traduction…';
     try{
-      const response = await fetch("https://api.anthropic.com/v1/messages", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          model: "claude-sonnet-4-6",
-          max_tokens: 800,
-          messages: [{
-            role: "user",
-            content: `Traduis le texte suivant en ${targetLang}. Réponds uniquement avec la traduction, sans commentaire ni préambule, en conservant la mise en forme (puces, paragraphes) :
+      const prompt = `Traduis le texte suivant en ${targetLang}. Réponds uniquement avec la traduction, sans commentaire ni préambule, en conservant la mise en forme (puces, paragraphes) :
 
-"""${currentSummary}"""`
-          }]
-        })
-      });
-      const data = await response.json();
-      const textOut = (data.content||[]).map(b=>b.text||'').join('\n').trim();
+"""${currentSummary}"""`;
+      const textOut = await callGemini(prompt);
       currentTranslation = textOut;
       currentTranslationLang = targetLang;
       el('translationTag').textContent = 'Traduction — '+targetLang;
