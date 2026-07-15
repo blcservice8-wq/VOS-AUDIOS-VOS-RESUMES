@@ -717,7 +717,7 @@
   // GRATUITE (sans carte bancaire) sur https://aistudio.google.com/apikey
   // puis collez-la ci-dessous.
   const GEMINI_API_KEY = "AQ.Ab8RN6IacyMzmUf0dX5Djhazvl-1E8hVPfRVU9INXMAUNhJLmg";
-  const GEMINI_MODEL = "gemini-2.5-flash";
+  const GEMINI_MODEL = "gemini-flash-latest";
   async function callGemini(prompt){
     if(!GEMINI_API_KEY || GEMINI_API_KEY.indexOf('REMPLACER')===0){
       throw new Error("La clé API Gemini n'est pas encore configurée (contactez votre administrateur technique).");
